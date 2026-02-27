@@ -7,8 +7,10 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdbool.h>
+#include <arpa/inet.h>
 #include <netinet/in.h>
 
+#include "net/tcp_connect.h"
 #include "utils/ipv4.h"
 
 typedef struct {
@@ -17,7 +19,7 @@ typedef struct {
     ipv4_t min_ip;
     ipv4_t max_ip;
 
-    long timeout_ms; // milliseconds
+    u_long timeout_ms; // milliseconds
 } params_t;
 
 static void usage(const char *prog) {
@@ -195,7 +197,28 @@ int main(int argc, char **argv) {
     printf("Port range: %u - %u\n", (unsigned)params.min_port, (unsigned)params.max_port);
     printf("Timeout: %ld ms\n", params.timeout_ms);
 
-    // TODO
+    for (ipv4_t ip = params.min_ip; ip <= params.max_ip; ip++) {
+        char ip_str[INET_ADDRSTRLEN];
+        ipv4_to_str(ip, ip_str, sizeof(ip_str));
+        for (uint16_t port = params.min_port; port <= params.max_port; port++) {
+            tcp_status_t status = tcp_connect(ip, port, params.timeout_ms);
+            if (status != TCP_ST_OK) {
+                if (status == TCP_ST_TIMEOUT) {
+                    printf("Connection timed out! IP: %s, Port: %d\n", ip_str, port);
+                    continue;
+                }
+                if (status == TCP_ST_CLOSED) {
+                    printf("Connection refused! IP: %s, Port: %d\n", ip_str, port);
+                    continue;
+                }
+                if (status == TCP_ST_ERROR) {
+                    printf("Connection error! IP: %s, Port: %d, Errno: %d\n", ip_str, port, errno);
+                    continue;
+                }
+            }
+            printf("!!! TCP connection success! IP: %s, Port: %d\n", ip_str, port);
+        }
+    }
 
     return EXIT_SUCCESS;
 }
