@@ -10,8 +10,14 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
+#include "net/icmp.h"
 #include "net/tcp_connect.h"
 #include "utils/ipv4.h"
+
+typedef enum {
+    TCP_CONNECT = 0,
+    ICMP = 1
+} scan_type_t;
 
 typedef struct {
     uint16_t min_port;
@@ -20,15 +26,17 @@ typedef struct {
     ipv4_t max_ip;
 
     u_long timeout_ms; // milliseconds
+    scan_type_t scan_type;
 } params_t;
 
 static void usage(const char *prog) {
     fprintf(stderr,
-        "Usage: %s -a <ip|ip-ip> -p <port|port-port> [-t <timeout_ms>]\n"
+        "Usage: %s -a <ip|ip-ip> -p <port|port-port> [-t <timeout_ms>] -s <tcp|icmp>\n"
         "Examples:\n"
-        "  %s -a 192.0.2.1 -p 22\n"
-        "  %s -a 192.0.2.1-192.0.2.254 -p 1-1024 -t 500\n",
-        prog, prog, prog);
+        "  %s -a 192.0.2.1 -p 22 -s tcp\n"
+        "  %s -a 192.0.2.1-192.0.2.254 -p 1-1024 -t 500\n"
+        "  %s -a 192.0.2.1 -t 2 -s icmp\n",
+        prog, prog, prog, prog);
 }
 
 static bool parse_port_range(const char *s, uint16_t *out_min, uint16_t *out_max) {
@@ -128,10 +136,11 @@ int main(int argc, char **argv) {
     params.min_ip = 0;
     params.max_ip = 0;
     params.timeout_ms = 1000; // default 1s
+    params.scan_type = -1;
 
     int opt;
     bool seen_a = false, seen_p = false;
-    while ((opt = getopt(argc, argv, "a:p:t:h")) != -1) {
+    while ((opt = getopt(argc, argv, "a:p:t:hs:")) != -1) {
         switch (opt) {
             case 'a': {
                 char tmp[128];
@@ -172,6 +181,20 @@ int main(int argc, char **argv) {
                 params.timeout_ms = v;
                 break;
             }
+            case 's': {
+                if (strcmp("tcp", optarg) == 0) {
+                    params.scan_type = TCP_CONNECT;
+                }
+                else if (strcmp("icmp", optarg) == 0) {
+                    params.scan_type = ICMP;
+                }
+                else {
+                    fprintf(stderr, "Invalid scan type: %s\n", optarg);
+                    usage(argv[0]);
+                    return EXIT_FAILURE;
+                }
+                break;
+            }
             case 'h':
             default:
                 usage(argv[0]);
@@ -179,7 +202,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (!seen_a || !seen_p) {
+    if (!seen_a || (!seen_p && params.scan_type != ICMP)) {
         usage(argv[0]);
         return EXIT_FAILURE;
     }
@@ -196,27 +219,52 @@ int main(int argc, char **argv) {
     printf("IP range: %s - %s\n", ipbuf_min, ipbuf_max);
     printf("Port range: %u - %u\n", (unsigned)params.min_port, (unsigned)params.max_port);
     printf("Timeout: %ld ms\n", params.timeout_ms);
+    printf("Scan type: %u\n", params.scan_type);
 
     for (ipv4_t ip = params.min_ip; ip <= params.max_ip; ip++) {
         char ip_str[INET_ADDRSTRLEN];
         ipv4_to_str(ip, ip_str, sizeof(ip_str));
-        for (uint16_t port = params.min_port; port <= params.max_port; port++) {
-            tcp_status_t status = tcp_connect(ip, port, params.timeout_ms);
-            if (status != TCP_ST_OK) {
-                if (status == TCP_ST_TIMEOUT) {
-                    printf("Connection timed out! IP: %s, Port: %d\n", ip_str, port);
-                    continue;
+
+        if (params.scan_type == TCP_CONNECT) {
+            // TCP CONNECTION SCAN
+            for (uint16_t port = params.min_port; port <= params.max_port; port++) {
+                tcp_status_t status = tcp_connect(ip, port, params.timeout_ms);
+                if (status != TCP_ST_OK) {
+                    if (status == TCP_ST_TIMEOUT) {
+                        printf("Connection timed out! IP: %s, Port: %d\n", ip_str, port);
+                        continue;
+                    }
+                    if (status == TCP_ST_CLOSED) {
+                        printf("Connection refused! IP: %s, Port: %d\n", ip_str, port);
+                        continue;
+                    }
+                    if (status == TCP_ST_ERROR) {
+                        printf("Connection error! IP: %s, Port: %d, Errno: %d\n", ip_str, port, errno);
+                        continue;
+                    }
                 }
-                if (status == TCP_ST_CLOSED) {
-                    printf("Connection refused! IP: %s, Port: %d\n", ip_str, port);
-                    continue;
+                printf("!!! TCP connection success! IP: %s, Port: %d\n", ip_str, port);
+            }
+        }
+        else {
+            icmp_status_t status = icmp_ping_sweep(ip, params.timeout_ms);
+            if (status != ICMP_ST_OK) {
+                if (status == ICMP_ST_TIMEOUT) {
+                    printf("Connection timed out! IP: %s\n", ip_str);
                 }
-                if (status == TCP_ST_ERROR) {
-                    printf("Connection error! IP: %s, Port: %d, Errno: %d\n", ip_str, port, errno);
-                    continue;
+                else if (status == ICMP_ST_ERROR) {
+                    printf("Connection error! IP: %s\n, errno: %d", ip_str, errno);
+                }
+                else if (status == ICMP_ST_UNREACHABLE) {
+                    printf("Unreachable IP: %s\n", ip_str);
+                }
+                else {
+                    printf("Internal error!\n");
                 }
             }
-            printf("!!! TCP connection success! IP: %s, Port: %d\n", ip_str, port);
+            else {
+                printf("!!! ICMP ECHO REPLY RECEIVED! IP: %s\n", ip_str);
+            }
         }
     }
 

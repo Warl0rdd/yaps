@@ -13,13 +13,7 @@
 #include <poll.h>
 
 #include "utils/ipv4.h"
-
-static int close_and_set_errno(int fd, int err) {
-    int saved = errno;
-    close(fd);
-    errno = err ? err : saved;
-    return -1;
-}
+#include "utils.h"
 
 tcp_status_t tcp_connect(ipv4_t ip, uint16_t port, u_long timeout) {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
